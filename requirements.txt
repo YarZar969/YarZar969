@@ -2,3 +2,5 @@ aiohttp
 aiohttp_socks
 python-telegram-bot
 ddddocr
+flask
+
