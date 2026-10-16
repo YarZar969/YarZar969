@@ -58,7 +58,7 @@ def keep_alive():
 #  CONFIG
 # ═══════════════════════════════════════════════════════════════════
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8682190407:AAGmfFT_Su-NjLPBiVicNu-Ugkh4KBcYdik")
-ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "8284079094","7954883652","8313960124","6287753590","7936325368","5721109642","8008903760","8692479413","7906338023").split(",")]
+ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "8284079094,7954883652,8313960124,6287753590,7936325368,5721109642,8008903760,8692479413,7906338023").split(",")]
 
 STATE_FILE = "state.json"
 PROXY_FILE = "proxies.txt"
@@ -150,10 +150,7 @@ class ProxyManager:
             if self.direct_enabled:
                 self.proxies.extend([DIRECT] * DIRECT_SLOTS)
             random.shuffle(self.proxies)
-            print(f"[Proxy] Loaded {len(real_proxies)} proxies + "
-                  f"{DIRECT_SLOTS if self.direct_enabled else 0} direct")
-        except Exception as e:
-            print(f"[Proxy] Error: {e}")
+        except Exception:
             self.proxies = [DIRECT] * DIRECT_SLOTS if self.direct_enabled else []
 
     def reload(self):
@@ -317,8 +314,8 @@ def _save_all_states(data):
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
         os.replace(tmp, STATE_FILE)
-    except Exception as e:
-        print(f"[State] Save error: {e}")
+    except Exception:
+        pass
 
 
 def save_user_state(user_id, state):
@@ -346,8 +343,8 @@ def save_user_state(user_id, state):
             })
         all_data[str(user_id)] = payload
         _save_all_states(all_data)
-    except Exception as e:
-        print(f"[State] Error: {e}")
+    except Exception:
+        pass
 
 
 def load_user_state(user_id):
@@ -685,7 +682,7 @@ async def worker(worker_id, user_id):
                 await asyncio.sleep(0.001)
         except asyncio.CancelledError:
             raise
-        except Exception as e:
+        except Exception:
             ud["net"] += 1
         finally:
             if session:
@@ -1016,7 +1013,6 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total, active = pm.stats()
     mode = ud.get("mode", context.user_data.get("selected_mode", "num6"))
 
-    # ═══════════ DIRECT MODE TOGGLE ═══════════
     if data == "btn_toggle_direct":
         new_state = not pm.direct_enabled
         await pm.set_direct_enabled(new_state)
@@ -1037,12 +1033,10 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                       reply_markup=get_main_menu_markup())
         return
 
-    # ═══════════ HIT FILE DOWNLOAD ═══════════
     if data == "btn_download_hits":
         await send_hits_file(update, context, user_id)
         return
 
-    # ═══════════ CLEAR HITS ═══════════
     if data == "btn_clear_hits":
         count = await clear_user_hits(user_id)
         await query.edit_message_text(
@@ -1056,7 +1050,6 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]))
         return
 
-    # ═══════════ PROXY CLEAR ═══════════
     if data == "btn_clear_proxies":
         old_count = await clear_all_proxies()
         await query.edit_message_text(
@@ -1070,7 +1063,6 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]))
         return
 
-    # ═══════════ BACK TO MAIN ═══════════
     if data == "btn_back_main":
         context.user_data.pop("waiting_for_proxy", None)
         context.user_data.pop("waiting_for_portal", None)
@@ -1359,7 +1351,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ═══════════════════════════════════════════════════════════════════
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     err = context.error
-    print(f"[ERROR] {type(err).__name__}: {err}")
     if err:
         traceback.print_exception(type(err), err, err.__traceback__)
 
@@ -1371,7 +1362,6 @@ def main():
     print("⚡ ULTIMATE RUIJIE SCANNER BOT (24/7 ACTIVE) ⚡")
     print("=" * 60)
 
-    # Flask Keep-Alive Server ကို စတင်ပေးခြင်း (Railway အတွက် လိုအပ်သည်)
     keep_alive()
 
     pm = get_proxy_manager()
