@@ -41,11 +41,11 @@ def keep_alive():
     t.start()
 
 # ── CONFIGURATION ──────────────────────────────────────────────────────────
-BOT_TOKEN = "8682190407:AAGmfFT_Su-NjLPBiVicNu-Ugkh4KBcYdik"  # <--- သင့် Bot Token
+BOT_TOKEN = "8682190407:AAGmfFT_Su-NjLPBiVicNu-Ugkh4KBcYdik"
 ADMIN_ID = 8284079094
 
-BATCH_SIZE = 2000        # Telegram Bot အတွက် သင့်တော်သော Batch Size
-MAX_CONCURRENT = 300     # သင့်တော်သော Concurrent Level
+BATCH_SIZE = 2000
+MAX_CONCURRENT = 300
 CONNECTION_LIMIT = 300
 TIMEOUT = 30
 
@@ -56,7 +56,6 @@ DIGITS = list(string.digits)
 LOWERCASE_CHARS = list(string.ascii_lowercase)
 MIXED_CHARS = list(string.ascii_lowercase + string.digits)
 
-# User တစ်ယောက်ချင်းစီ၏ Scan State များကို မှတ်ထားရန် Dict
 user_scans = {}
 
 # ── OCR INITIALIZATION ───────────────────────────────────────────────────
@@ -486,7 +485,6 @@ async def post_init(application: Application):
     _connector = aiohttp.TCPConnector(limit=CONNECTION_LIMIT, enable_cleanup_closed=False)
 
 def main():
-    # Flask Keep Alive Server ကို စတင်ပေးခြင်း (Railway အတွက် အရေးကြီးသည်)
     keep_alive()
 
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
