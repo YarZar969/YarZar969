@@ -58,7 +58,7 @@ def keep_alive():
 #  CONFIG
 # ═══════════════════════════════════════════════════════════════════
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8682190407:AAGmfFT_Su-NjLPBiVicNu-Ugkh4KBcYdik")
-ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "8284079094","7954883652","8313960124","6287753590","7936325368","5721109642","8008903760","8692479413").split(",")]
+ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "8284079094","7954883652","8313960124","6287753590","7936325368","5721109642","8008903760","8692479413","7906338023").split(",")]
 
 STATE_FILE = "state.json"
 PROXY_FILE = "proxies.txt"
